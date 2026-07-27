@@ -1,0 +1,90 @@
+name: "Beaver Logs Ingest"
+description: "Upload build telemetry to Beaver Logs — Xcode traces (.xcactivitylog), APK/AAB size metrics, or raw OTLP."
+branding:
+  icon: "upload-cloud"
+  color: "orange"
+
+inputs:
+  api-key:
+    description: "Beaver Logs API key (sent as Authorization: Bearer). Pass ${{ secrets.BEAVER_LOGS_API_KEY }}."
+    required: true
+  project-id:
+    description: "Beaver Logs project UUID (maps to service.namespace, the scoping key)."
+    required: true
+  endpoint:
+    description: "OTLP ingest base URL; the CLIs append /v1/traces and /v1/metrics."
+    required: false
+    default: "https://ingest.beaverlogs.app/ingest"
+  xcactivitylog:
+    description: "Path/glob to an .xcactivitylog (macOS only). Empty = newest under DerivedData/**/Logs/Build."
+    required: false
+    default: ""
+  artifact:
+    description: "Path/glob to a .apk or .aab. Empty = newest match of **/build/outputs/**/*.{apk,aab}."
+    required: false
+    default: ""
+  otlp-file:
+    description: "Raw OTLP/HTTP-JSON file to POST as-is (no CLI involved)."
+    required: false
+    default: ""
+  otlp-signal:
+    description: "Signal for otlp-file: traces | metrics | logs. POSTed to /v1/<signal>."
+    required: false
+    default: "traces"
+  cli-version-xcode:
+    description: "xcode-parser release version to download (macOS leg)."
+    required: false
+    default: "1.0.0"
+  cli-version-artifact:
+    description: "artifact-analyzer release version to download (any OS)."
+    required: false
+    default: "0.1.0"
+
+runs:
+  using: "composite"
+  steps:
+    # Derive git/CI context from the GitHub event and expose it to later steps.
+    # (These are attributes, never secrets — safe to write to $GITHUB_ENV.)
+    - name: Derive build context
+      shell: bash
+      run: |
+        {
+          echo "BL_BRANCH=${{ github.head_ref || github.ref_name }}"
+          echo "BL_COMMIT=${{ github.sha }}"
+          echo "BL_RUN_ID=${{ github.run_id }}"
+          echo "BL_PR=${{ github.event.pull_request.number }}"
+        } >> "$GITHUB_ENV"
+
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "21"
+
+    - name: Install Beaver Logs CLIs
+      shell: bash
+      env:
+        CLI_VERSION_ARTIFACT: ${{ inputs.cli-version-artifact }}
+        CLI_VERSION_XCODE: ${{ inputs.cli-version-xcode }}
+      run: bash "${{ github.action_path }}/scripts/install-clis.sh"
+
+    - name: Ingest artifact + raw OTLP (any OS)
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api-key }}
+        PROJECT_ID: ${{ inputs.project-id }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        ARTIFACT_INPUT: ${{ inputs.artifact }}
+        OTLP_FILE: ${{ inputs.otlp-file }}
+        OTLP_SIGNAL: ${{ inputs.otlp-signal }}
+      run: bash "${{ github.action_path }}/scripts/detect-and-ingest.sh"
+
+    - name: Ingest Xcode build log (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api-key }}
+        PROJECT_ID: ${{ inputs.project-id }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        XCACTIVITYLOG_INPUT: ${{ inputs.xcactivitylog }}
+      run: bash "${{ github.action_path }}/scripts/ingest-xcode.sh"
